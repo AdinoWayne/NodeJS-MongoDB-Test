@@ -21,7 +21,7 @@ const loginWrapper: RequestHandler = async (req, res) => {
       }
     );
     const userObject = user.toObject();
-    userObject.accessToken = token;
+    userObject.token = token;
     return res.status(200).send(userObject);
   }
 

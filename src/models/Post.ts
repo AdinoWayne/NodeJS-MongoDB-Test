@@ -16,5 +16,5 @@ import {
     author: { type: String, required: true }
   });
   
-  export const Book: IPostModel = model<IPost, IPostModel>('Post', schema);
+  export const Post: IPostModel = model<IPost, IPostModel>('Post', schema);
   
