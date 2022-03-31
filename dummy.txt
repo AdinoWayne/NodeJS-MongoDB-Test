@@ -1,0 +1,473 @@
+class ReworkState(Enum):
+    REWORK__NONE                                        = auto()
+
+    # Running Mode for setting from Pi Web UI
+    REWORK__ALL_AUTO                                    = auto()
+    REWORK__ALL_MANUAL                                  = auto()
+
+
+    # Note: bellow items must follow the format, action, fail, success
+    # Pi and Cloud
+    REWORK__CHECKING_FW_VER_WITH_CLOUD                  = auto()
+    REWORK__FAIL_CHECKING_FW_VER_WITH_CLOUD             = auto()
+    REWORK__SUCCESS_CHECKING_FW_VER_WITH_CLOUD          = auto()
+
+    REWORK__DOWNLOAD_FW_FROM_CLOUD                      = auto()
+    REWORK__FAIL_DOWNLOAD_FW_FROM_CLOUD                 = auto()
+    REWORK__SUCCESS_DOWNLOAD_FW_FROM_CLOUD              = auto()
+
+
+    # Pi and V4
+    REWORK__SCANNING                                    = auto()
+    REWORK__FAIL_SCANNING                               = auto()
+    REWORK__SUCCESS_SCANNING                            = auto()
+
+    REWORK__SENDING_V4_INFO_TO_CLOUD                    = auto()
+    REWOWK__FAIL_SENDING_V4_INFO_TO_CLOUD               = auto()
+    REWOWK__SUCCESS_SENDING_V4_INFO_TO_CLOUD            = auto()
+
+    REWORK__DONWLOADING_PLUME_CAS_FROM_CLOUD            = auto()
+    REWORK__FAIL_DONWLOADING_PLUME_CAS_FROM_CLOUD       = auto()
+    REWORK__SUCCESS_DONWLOADING_PLUME_CAS_FROM_CLOUD    = auto()
+
+    REWORK__OPENNING_SSH_SERVER_ON_V4                   = auto()
+    REWORK__FAIL_OPENNING_SSH_SERVER_ON_V4              = auto()
+    REWORK__SUCCESS_OPENNING_SSH_SERVER_ON_V4           = auto()
+
+    REWORK__SENDING_FW_TO_V4                            = auto()
+    REWORK__FAIL_SENDING_FW_TO_V4                       = auto()
+    REWORK__SUCCESS_SENDING_FW_TO_V4                    = auto()
+
+    REWORK__SENDING_PLUME_CAS_TO_V4                     = auto()
+    REWORK__FAIL_SENDING_PLUME_CAS_TO_V4                = auto()
+    REWORK__SUCCESS_SENDING_PLUME_CAS_TO_V4             = auto()
+
+    REWORK__INSTALLING_PLUME_CAS_ON_V4                  = auto()
+    REWORK__FAIL_INSTALLING_PLUME_CAS_ON_V4             = auto()
+    REWORK__SUCCESS_INSTALLING_PLUME_CAS_ON_V4          = auto()
+
+    REWORK__INSTALLING_FW_FOR_V4                        = auto()
+    REWORK__FAIL_INSTALLING_FW_FOR_V4                   = auto()
+    REWORK__SUCCESS_INSTALLING_FW_FOR_V4                = auto()
+
+    REWORK__SENDING_UPGRADED_LOG_TO_CLOUD               = auto()
+    REWORK__FAIL_SENDING_UPGRADED_LOG_TO_CLOUD          = auto()
+    REWORK__SUCCESS_SENDING_UPGRADED_LOG_TO_CLOUD       = auto()
+
+    ####################################################################
+#
+# Author:        Flash
+# Email:         ndquan2@humaxdigital.com
+# Created:       16 March 2022
+# Description:   route handling at http rapsberry pi server side
+#                for request messages
+#
+####################################################################
+
+import os
+import jwt
+import time
+import pandas as pd
+
+from flask          import render_template, flash, redirect, request, url_for
+from flask          import jsonify, send_file, send_from_directory
+from flask_login    import current_user, login_user
+from flask_login    import logout_user
+from flask_login    import login_required
+from werkzeug.urls  import url_parse
+from tools          import logger_api
+from flask_restx    import Api, Resource, fields
+from datetime       import datetime, timezone, timedelta
+from functools      import wraps
+
+from .models import db, Users, JWTTokenBlocklist
+from web_ui import configs, flask_app
+
+
+base_dir               = os.path.abspath(os.path.dirname(__file__))
+debug_obj              = logger_api.HmxLogger()
+
+
+rest_api = Api(version="1.0", title="Raspberry PI API")
+
+
+signup_model    = rest_api.model('Sign Up Model',   {"username": fields.String(required=True, min_length=2, max_length=32),
+                                                    "email"   : fields.String(required=True, min_length=4, max_length=64),
+                                                    "password": fields.String(required=True, min_length=4, max_length=16)})
+
+login_model     = rest_api.model('Login Model',     {"username": fields.String(required=True, min_length=4, max_length=32),
+                                                    "password": fields.String(required=True, min_length=4, max_length=16)})
+
+do_action_model = rest_api.model('Do Action Model', {"action_name"  : fields.String(required=True, min_length=1, max_length=256)})
+
+
+# For Frontend resource query
+@flask_app.route('/', defaults={'path': ''})
+@flask_app.route('/<path:path>')
+def all(path):
+    return send_from_directory('static/dist', path='index.html')
+
+
+# Token handler for each API request
+def token_required(f):
+
+    @wraps(f)
+    def decorator(*args, **kwargs):
+
+        token = None
+
+        if "Authorization" in request.headers:
+            token = request.headers["Authorization"]
+
+        if not token:
+            return {"success": False, "msg": "Valid JWT token is missing"}, 400
+
+        try:
+            data = jwt.decode(token, configs.ConfigFlaskApp.SECRET_KEY, algorithms=["HS256"])
+            current_user = Users.get_by_username(data["username"])
+
+            if not current_user:
+                return {"success": False,
+                        "msg": "Sorry. Wrong auth token. This user does not exist."}, 400
+
+            token_expired = db.session.query(JWTTokenBlocklist.id).filter_by(jwt_token=token).scalar()
+
+            if token_expired is not None:
+                return {"success": False, "msg": "Token revoked."}, 400
+
+            if not current_user.check_jwt_auth_active():
+                return {"success": False, "msg": "Token expired."}, 400
+
+        except:
+            return {"success": False, "msg": "Token is invalid"}, 400
+
+        return f(current_user, *args, **kwargs)
+
+    return decorator
+
+
+# Register new account
+@rest_api.route('/api/pi/register')
+class Register(Resource):
+
+    @rest_api.expect(signup_model, validate=True)
+    def post(self):
+
+        req_data    = request.get_json()
+
+        _username   = req_data.get("username")
+        _email      = req_data.get("email")
+        _password   = req_data.get("password")
+
+        user_exists = Users.get_by_email(_email)
+        if user_exists:
+            return {"success": False,
+                    "msg": "Email already taken"}, 400
+
+        new_user = Users(username=_username, email=_email)
+
+        new_user.set_password(_password)
+        new_user.save()
+
+        return {"success": True,
+                "userID": new_user.id,
+                "msg": "The user was successfully registered"}, 200
+
+# Login to web UI
+@rest_api.route('/api/pi/login')
+class Login(Resource):
+
+    @rest_api.expect(login_model, validate=True)
+    def post(self):
+
+        req_data    = request.get_json()
+
+        _u_name     = req_data.get("username")
+        _password   = req_data.get("password")
+        user_exists = Users.get_by_username(_u_name)
+
+        if not user_exists:
+            return {"success": False,
+                    "msg": "This user name does not exist."}, 400
+
+        if not user_exists.check_password(_password):
+            return {"success": False,
+                    "msg": "Wrong credentials."}, 400
+
+        # Create access token uwing JWT
+        token = jwt.encode({'username': _u_name, 'exp': datetime.utcnow() + \
+                            configs.ConfigFlaskApp.JWT_ACCESS_TOKEN_EXPIRES}, configs.ConfigFlaskApp.SECRET_KEY)
+
+        user_exists.set_jwt_auth_active(True)
+        user_exists.save()
+
+        return {"success": True,
+                "token": token,
+                "user": user_exists.toJSON()}, 200
+
+# Logout from WEB UI
+@rest_api.route('/api/pi/logout')
+class LogoutUser(Resource):
+
+    @token_required
+    def post(self, current_user):
+
+        _jwt_token = request.headers["authorization"]
+
+        jwt_block = JWTTokenBlocklist(jwt_token=_jwt_token, created_at=datetime.now(timezone.utc))
+        jwt_block.save()
+
+        self.set_jwt_auth_active(False)
+        self.save()
+
+        return {"success": True}, 200
+
+
+@rest_api.route('/api/pi/get_v4_info')
+class GetV4Info(Resource):
+
+    @token_required
+    def get(self, current_user):
+
+        if configs.__get_current_rework_state__pi_v4().value >= \
+                    configs.ReworkState.REWORK__SUCCESS_SCANNING.value:
+            info = {\
+                "cm_mac": "{}".format(configs.__get_hgj310v4_cm_mac()),     \
+                "sn_num": "{}".format(configs.__get_hgj310v4_ser_num()),    \
+                "fw_ver": "{}".format(configs.__get_hgj310v4_pre_fw_ver())  \
+            }
+        else:
+            info = {\
+                "cm_mac": "",  \
+                "sn_num": "",  \
+                "fw_ver": ""   \
+            }
+
+        return info, 200
+
+
+@rest_api.route('/api/pi/get_cloud_info')
+class GetCloudInfo(Resource):
+
+    @token_required
+    def get(self, current_user):
+
+        if configs.__get_current_rework_state__pi_cloud().value == \
+                        configs.ReworkState.REWORK__SUCCESS_DOWNLOAD_FW_FROM_CLOUD.value:
+            info = {\
+                "curr_state":       "{}".format(configs.__get_current_rework_state__pi_cloud()),  \
+                "fw_name":          "{}".format(os.path.basename(configs.__get_fw_file_path())),  \
+                "fw_size":          "{}".format(configs.__get_fw_file_size()),                    \
+                "fw_md5_hash":      "{}".format(configs.__get_fw_md5_hash()),                     \
+                "cloud_connected":  "{}".format(configs.__get_hmx_cloud_connected())
+            }
+        else:
+            info = {\
+                "curr_state":      configs.__get_current_rework_state__pi_cloud(),  \
+                "fw_name":         "",                                              \
+                "fw_size":         "",                                              \
+                "fw_md5_hash":     "",                                              \
+                "cloud_connected": "{}".format(configs.__get_hmx_cloud_connected())
+            }
+
+        return info, 200
+
+@rest_api.route('/api/pi/get_rework_states')
+class GetReworkStates(Resource):
+
+    @token_required
+    def get(self, current_user):
+
+        info = {\
+            "pi_cloud_state":       "{}".format(configs.__get_current_rework_state__pi_cloud()),  \
+            "pi_v4_state":          "{}".format(configs.__get_current_rework_state__pi_v4())      \
+        }
+
+        return info, 200
+
+
+# If current state is one of following, sending v4 info to cloud can be done in next step
+states_for_send_v4_info_action =        [\
+                                        configs.ReworkState.REWORK__SUCCESS_SCANNING,                           \
+                                        configs.ReworkState.REWOWK__FAIL_SENDING_V4_INFO_TO_CLOUD               \
+                                        ]
+
+# If current state is one of following, downloading Plume CAs from cloud can be done in next step
+states_for_download_plume_cas_action =  [\
+                                        configs.ReworkState.REWOWK__SUCCESS_SENDING_V4_INFO_TO_CLOUD,           \
+                                        configs.ReworkState.REWORK__FAIL_DONWLOADING_PLUME_CAS_FROM_CLOUD       \
+                                        ]
+
+# If current state is one of following, opening ssh server on V4 can be done in next step
+states_for_open_ssh_server_action =     [\
+                                        configs.ReworkState.REWORK__SUCCESS_DONWLOADING_PLUME_CAS_FROM_CLOUD,   \
+                                        configs.ReworkState.REWORK__FAIL_OPENNING_SSH_SERVER_ON_V4              \
+                                        ]
+
+# If current state is one of following, sending FW to V4 can be done in next step
+states_for_send_fw_to_v4_action =       [\
+                                        configs.ReworkState.REWORK__SUCCESS_OPENNING_SSH_SERVER_ON_V4,          \
+                                        configs.ReworkState.REWORK__FAIL_SENDING_FW_TO_V4                       \
+                                        ]
+
+# If current state is one of following, sending Plume CAs to V4 can be done in next step
+states_for_send_plume_cas_to_v4_action = [\
+                                        configs.ReworkState.REWORK__SUCCESS_SENDING_FW_TO_V4,                   \
+                                        configs.ReworkState.REWORK__FAIL_SENDING_PLUME_CAS_TO_V4                \
+                                        ]
+
+# If current state is one of following, installing Plume CAs on V4 can be done in next step
+states_for_install_plume_cas_on_v4_action = [\
+                                        configs.ReworkState.REWORK__SUCCESS_SENDING_PLUME_CAS_TO_V4,            \
+                                        configs.ReworkState.REWORK__FAIL_INSTALLING_PLUME_CAS_ON_V4             \
+                                        ]
+
+
+# If current state is one of following, installing FW for V4 can be done in next step
+states_for_install_fw_for_v4_action =   [\
+                                        configs.ReworkState.REWORK__SUCCESS_INSTALLING_PLUME_CAS_ON_V4,         \
+                                        configs.ReworkState.REWORK__FAIL_INSTALLING_FW_FOR_V4                   \
+                                        ]
+
+# If current state is one of following, sending log to cloud can be done in next step
+states_for_send_log_to_cloud_action =   [\
+                                        configs.ReworkState.REWOWK__FAIL_SENDING_V4_INFO_TO_CLOUD,              \
+                                        configs.ReworkState.REWORK__FAIL_DONWLOADING_PLUME_CAS_FROM_CLOUD,      \
+                                        configs.ReworkState.REWORK__FAIL_OPENNING_SSH_SERVER_ON_V4,             \
+                                        configs.ReworkState.REWORK__FAIL_SENDING_FW_TO_V4,                      \
+                                        configs.ReworkState.REWORK__FAIL_SENDING_PLUME_CAS_TO_V4,               \
+                                        configs.ReworkState.REWORK__FAIL_INSTALLING_PLUME_CAS_ON_V4,            \
+                                        configs.ReworkState.REWORK__FAIL_INSTALLING_FW_FOR_V4,                  \
+                                        configs.ReworkState.REWORK__SUCCESS_INSTALLING_FW_FOR_V4                \
+                                        ]
+
+
+def check_valid_state_and_set_action(valid_state_list, request_action):
+
+    if configs.__get_rework_run_mode() == configs.ReworkState.REWORK__ALL_AUTO:
+        return {"status": False, "detail" : "Current Rework Run Mode is auto, does not support requested action"}, 200
+
+    if configs.__get_hmx_cloud_connected() == False:
+        return {"status": False, "detail" : "No connection to Cloud now, then can not do requested action"}
+
+    if configs.__get_fw_file_path() == "None":
+        return {"status": False, "detail" : "No valid FW on Rapsberry Pi now, then can not do requested action"}
+
+    for item in valid_state_list:
+        curent_state_pi_v4 = configs.__get_current_rework_state__pi_v4()
+
+        if curent_state_pi_v4 == item:
+            configs.__set_pi_web_ui_request_action__pi_v4(request_action)
+            return True
+
+    return {"status": False, "detail" : "Invalid request action"}
+
+
+@rest_api.route('/api/pi/do_action')
+class DoAction(Resource):
+
+    @rest_api.expect(do_action_model)
+    @token_required
+    def post(self, current_user):
+
+        req_data    = request.get_json()
+        action_name = req_data.get("action_name")
+
+
+        # Setting Run Mode
+        if action_name   == "REWORK__ALL_AUTO":
+            configs.__set_rework_run_mode(configs.ReworkState.REWORK__ALL_AUTO)
+
+            # Reset requested actions
+            configs.__set_pi_web_ui_request_action__pi_v4(configs.ReworkState.REWORK__NONE)
+            configs.__set_pi_web_ui_request_action__pi_cloud(configs.ReworkState.REWORK__NONE)
+
+        elif action_name ==  "REWORK__ALL_MANUAL":
+            configs.__set_rework_run_mode(configs.ReworkState.REWORK__ALL_MANUAL)
+
+            # Reset requested actions
+            configs.__set_pi_web_ui_request_action__pi_v4(configs.ReworkState.REWORK__NONE)
+            configs.__set_pi_web_ui_request_action__pi_cloud(configs.ReworkState.REWORK__NONE)
+
+
+        # Setting action for Pi and Cloud
+        elif action_name ==  "REWORK__CHECKING_FW_VER_WITH_CLOUD":
+            # REWORK__DOWNLOAD_FW_FROM_CLOUD should be included in this action
+            if configs.__get_hmx_cloud_connected() == False:
+                return {"status": False, "detail" : "No connection to Cloud now"}, 200
+
+            if configs.__get_rework_run_mode() == configs.ReworkState.REWORK__ALL_AUTO:
+                return {"status": False, "detail" : "Current Rework Run Mode is auto, does not support requested action"}, 200
+
+            configs.__set_pi_web_ui_request_action__pi_cloud(configs.ReworkState.REWORK__CHECKING_FW_VER_WITH_CLOUD)
+
+
+        # Setting action for PI and HGJ310v4
+        elif action_name ==  "REWORK__SCANNING":
+
+            if configs.__get_rework_run_mode() == configs.ReworkState.REWORK__ALL_AUTO:
+                return {"status": False, "detail" : "Current Rework Run Mode is auto, does not support requested action"}, 200
+
+            # For all types of current state, scan action can be next step
+            configs.__set_pi_web_ui_request_action__pi_v4(configs.ReworkState.REWORK__SCANNING)
+
+        elif action_name ==  "REWORK__SENDING_V4_INFO_TO_CLOUD":
+            result = check_valid_state_and_set_action(states_for_send_v4_info_action,      \
+                                                        configs.ReworkState.REWORK__SENDING_V4_INFO_TO_CLOUD)
+            if result != True:
+                return result, 200
+
+        elif action_name ==  "REWORK__DONWLOADING_PLUME_CAS_FROM_CLOUD":
+            result = check_valid_state_and_set_action(states_for_download_plume_cas_action, \
+                                                        configs.ReworkState.REWORK__DONWLOADING_PLUME_CAS_FROM_CLOUD)
+            if result != True:
+                return result, 200
+
+        elif action_name ==  "REWORK__OPENNING_SSH_SERVER_ON_V4":
+            result = check_valid_state_and_set_action(states_for_open_ssh_server_action,    \
+                                                        configs.ReworkState.REWORK__OPENNING_SSH_SERVER_ON_V4)
+            if result != True:
+                return result, 200
+
+        elif action_name ==  "REWORK__SENDING_FW_TO_V4":
+            result = check_valid_state_and_set_action(states_for_send_fw_to_v4_action,       \
+                                                        configs.ReworkState.REWORK__SENDING_FW_TO_V4)
+            if result != True:
+                return result, 200
+
+        elif action_name ==  "REWORK__SENDING_PLUME_CAS_TO_V4":
+            result = check_valid_state_and_set_action(states_for_send_plume_cas_to_v4_action, \
+                                                        configs.ReworkState.REWORK__SENDING_PLUME_CAS_TO_V4)
+            if result != True:
+                return result, 200
+
+        elif action_name ==  "REWORK__INSTALLING_PLUME_CAS_ON_V4":
+            result = check_valid_state_and_set_action(states_for_install_plume_cas_on_v4_action, \
+                                                        configs.ReworkState.REWORK__INSTALLING_PLUME_CAS_ON_V4)
+            if result != True:
+                return result, 200
+
+        elif action_name ==  "REWORK__INSTALLING_FW_FOR_V4":
+            result = check_valid_state_and_set_action(states_for_install_fw_for_v4_action, \
+                                                        configs.ReworkState.REWORK__INSTALLING_FW_FOR_V4)
+            if result != True:
+                return result, 200
+
+        elif action_name ==  "REWORK__SENDING_UPGRADED_LOG_TO_CLOUD":
+            result = check_valid_state_and_set_action(states_for_send_log_to_cloud_action, \
+                                                        configs.ReworkState.REWORK__SENDING_UPGRADED_LOG_TO_CLOUD)
+            if result != True:
+                return result, 200
+
+        else:
+            debug_obj.print_warning("Raspberry PI UI requests invalid action")
+            return {"status": False, "detail": "Requested action is not matched with action list"}, 200
+
+        return {"status": True, "detail": "Set action successfully"}, 200
+
+
+const API_URL = 'http://192.168.100.222:8001/api/pi/';
+get_cloud_info
+get_rework_states
+get_v4_info
+do_action
