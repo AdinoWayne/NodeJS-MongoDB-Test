@@ -75,7 +75,7 @@ export default class MongoConnection {
       level: 'info',
       message: `Connecting to MongoDB ....`
     });
-    mongoose.connect(`mongodb+srv://${this.mongoUrl}/myFirstDatabase?retryWrites=true&w=majority `, this.mongoConnectionOptions).catch(() => { });
+    mongoose.connect(`mongodb+srv://${this.mongoUrl}/myFirstDatabase?retryWrites=true`, this.mongoConnectionOptions).catch(() => { });
   }
 
   /**

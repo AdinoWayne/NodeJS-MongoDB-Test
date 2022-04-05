@@ -5,9 +5,8 @@ import { User } from '../../models/User';
 import { logger } from './../../logger';
 
 const loginWrapper: RequestHandler = async (req, res) => {
-  const { email = undefined, password = undefined } = req.body;
-
-  const user = await User.findOne({ email });
+  const { username = undefined, password = undefined } = req.body;
+  const user = await User.findOne({ email: username });
   console.log(user);
   if (user && user.validPassword(password)) {
     const token = jwt.sign(

@@ -23,6 +23,7 @@ router.get('/pi/get_v4_info', PiController.get_v4_info);
 router.get('/pi/get_rework_states', PiController.get_rework_states);
 router.get('/pi/get_cloud_info', PiController.get_cloud_info);
 router.post('/pi/do_action', PiController.do_action);
+router.get('/pi/get_rework_mode', PiController.get_rework_mode);
 
 // User routes
 router.get('/user/all', UserController.all);
